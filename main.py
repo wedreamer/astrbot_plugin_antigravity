@@ -278,7 +278,7 @@ class AntigravityProvider(Provider):
     "astrbot_plugin_antigravity",
     "wedreamer",
     "Proxy AstrBot chat to the local Antigravity Gemini pool bridge",
-    "0.1.1",
+    "0.1.2",
 )
 class AntigravityPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None) -> None:
