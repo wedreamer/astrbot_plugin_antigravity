@@ -1,0 +1,32 @@
+{
+  "api_base": {
+    "description": "AstrBot 访问桥的地址。同机用 http://127.0.0.1:18765/v1。AstrBot 在 Docker 里时改成 http://host.docker.internal:18765/v1",
+    "type": "string",
+    "default": "http://127.0.0.1:18765/v1"
+  },
+  "proxy": {
+    "description": "桥访问 Google 的 HTTP 代理，例如 http://127.0.0.1:7890。留空表示直连。不要填 socks。这个代理不会用来访问本机桥",
+    "type": "string",
+    "default": ""
+  },
+  "bridge_bind": {
+    "description": "桥监听地址。同机保持 127.0.0.1。需要给 Docker 访问时填 0.0.0.0，并同时把 api_base 改成容器能访问的地址",
+    "type": "string",
+    "default": "127.0.0.1"
+  },
+  "accounts_path": {
+    "description": "antigravity-accounts.json 路径",
+    "type": "string",
+    "default": "~/.config/opencode/antigravity-accounts.json"
+  },
+  "repo_path": {
+    "description": "opencode-antigravity-auth 仓库绝对路径。桥已经在跑时可以留空",
+    "type": "string",
+    "default": ""
+  },
+  "key": {
+    "description": "桥的本地令牌，要和启动桥时的 --token 一致",
+    "type": "string",
+    "default": "local"
+  }
+}

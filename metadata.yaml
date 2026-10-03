@@ -1,0 +1,9 @@
+name: astrbot_plugin_antigravity
+display_name: Antigravity Gemini 号池
+desc: 把 AstrBot 的对话接到本机 OpenAI 兼容桥，复用已有的 Antigravity Gemini 号池，不把协议重写成 Python。
+version: 0.1.0
+author: wedreamer
+repo: https://github.com/wedreamer/astrbot_plugin_antigravity
+tags:
+  - gemini
+  - antigravity
