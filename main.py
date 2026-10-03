@@ -15,8 +15,10 @@ from astrbot.core.provider.provider import Provider
 from astrbot.core.provider.register import register_provider_adapter
 
 try:
+    from .chat_tools import ChatTurn, build_chat_body, parse_bridge_completion
     from .settings import bind_host, chat_url, health_url, load_settings, local_target, save_plugin_settings
 except ImportError:
+    from chat_tools import ChatTurn, build_chat_body, parse_bridge_completion
     from settings import bind_host, chat_url, health_url, load_settings, local_target, save_plugin_settings
 
 
@@ -111,33 +113,6 @@ async def _post_chat(config: dict[str, Any], body: dict[str, Any], session_key: 
     return payload
 
 
-def _completion_text(payload: dict[str, Any]) -> str:
-    choices = payload.get("choices")
-    if not isinstance(choices, list) or not choices:
-        return ""
-    message = choices[0].get("message") if isinstance(choices[0], dict) else None
-    if not isinstance(message, dict):
-        return ""
-    content = message.get("content")
-    return content if isinstance(content, str) else ""
-
-
-def _messages(prompt: str | None, contexts: list[Any] | None, system_prompt: str | None) -> list[dict[str, str]]:
-    messages: list[dict[str, str]] = []
-    if system_prompt:
-        messages.append({"role": "system", "content": system_prompt})
-    for item in contexts or []:
-        if isinstance(item, dict) and isinstance(item.get("role"), str):
-            content = item.get("content")
-            messages.append({
-                "role": item["role"],
-                "content": content if isinstance(content, str) else str(content or ""),
-            })
-    if prompt:
-        messages.append({"role": "user", "content": prompt})
-    return messages
-
-
 @register_provider_adapter(
     "antigravity",
     "Gemini via the local Antigravity account pool",
@@ -187,13 +162,28 @@ class AntigravityProvider(Provider):
         request_max_retries: int | None = None,
         **kwargs: Any,
     ) -> LLMResponse:
-        del image_urls, audio_urls, func_tool, tool_calls_result
-        del extra_user_content_parts, tool_choice, request_max_retries
-        payload = await _post_chat(self.provider_config, {
-            "model": model or self.get_model() or "gemini-3.8-flash",
-            "messages": _messages(prompt, contexts, system_prompt),
-        }, _session_key(session_id, kwargs))
-        return LLMResponse(role="assistant", completion_text=_completion_text(payload))
+        del image_urls, audio_urls, extra_user_content_parts, request_max_retries
+        payload = await _post_chat(
+            self.provider_config,
+            build_chat_body(ChatTurn(
+                model=model or self.get_model() or "gemini-3.8-flash",
+                prompt=prompt,
+                contexts=tuple(contexts or ()),
+                system_prompt=system_prompt,
+                func_tool=func_tool,
+                tool_calls_result=tool_calls_result,
+                tool_choice=tool_choice,
+            )),
+            _session_key(session_id, kwargs),
+        )
+        parsed = parse_bridge_completion(payload)
+        return LLMResponse(
+            role=parsed.role,
+            completion_text=parsed.completion_text,
+            tools_call_name=parsed.tools_call_name or [],
+            tools_call_ids=parsed.tools_call_ids or [],
+            tools_call_args=parsed.tools_call_args or [],
+        )
 
     async def text_chat_stream(
         self,
@@ -226,14 +216,18 @@ class AntigravityProvider(Provider):
         )
         result.is_chunk = True
         yield result
-        yield LLMResponse(role="assistant", completion_text=result.completion_text)
+        final = LLMResponse(role=result.role, completion_text=result.completion_text)
+        final.tools_call_name = result.tools_call_name
+        final.tools_call_ids = result.tools_call_ids
+        final.tools_call_args = result.tools_call_args
+        yield final
 
 
 @register(
     "astrbot_plugin_antigravity",
     "wedreamer",
     "Proxy AstrBot chat to the local Antigravity Gemini pool bridge",
-    "0.1.0",
+    "0.1.1",
 )
 class AntigravityPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None) -> None:
