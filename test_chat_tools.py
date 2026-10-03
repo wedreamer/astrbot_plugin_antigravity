@@ -182,6 +182,139 @@ class ChatToolsTest(unittest.TestCase):
             "content": "volume 1",
         }])
 
+    def test_maps_usage_signature_and_keeps_structured_context(self) -> None:
+        parsed = parse_bridge_completion({
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 7,
+                "total_tokens": 107,
+                "prompt_tokens_details": {"cached_tokens": 40},
+            },
+            "antigravity_reasoning_signature": "SIG",
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": "answer",
+                    "reasoning_content": "why",
+                    "tool_calls": [{
+                        "id": "fc_1",
+                        "type": "function",
+                        "function": {"name": "cbeta_search", "arguments": "{}"},
+                        "extra_content": {"google": {"thought_signature": "SIG"}},
+                    }],
+                },
+            }],
+        })
+        self.assertEqual(parsed.usage, {"input_other": 60, "input_cached": 40, "output": 7})
+        self.assertEqual(parsed.reasoning_content, "why")
+        self.assertEqual(parsed.reasoning_signature, "SIG")
+        self.assertEqual(parsed.tools_call_extra_content, {"fc_1": {"google": {"thought_signature": "SIG"}}})
+        self.assertNotIn("why", parsed.completion_text)
+
+        body = build_chat_body(ChatTurn(
+            model="gemini-3.8-flash",
+            contexts=({
+                "role": "assistant",
+                "content": [{"type": "think", "think": "why", "encrypted": "SIG"}],
+                "tool_calls": [{
+                    "id": "fc_1",
+                    "extra_content": {"google": {"thought_signature": "SIG"}},
+                }],
+            },),
+        ))
+        message = body["messages"][0]
+        self.assertEqual(message["content"][0]["type"], "think")
+        self.assertEqual(message["tool_calls"][0]["extra_content"]["google"]["thought_signature"], "SIG")
+        self.assertNotIsInstance(message["content"], str)
+
+
+class ProviderFieldTest(unittest.TestCase):
+    def test_text_chat_passes_usage_and_stream_final_is_not_a_chunk(self) -> None:
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        from astrbot.core.provider.entities import TokenUsage
+        from main import AntigravityProvider, _post_chat
+
+        payload = {
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 7,
+                "prompt_tokens_details": {"cached_tokens": 40},
+            },
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": "answer", "reasoning_content": "why"},
+            }],
+        }
+        provider = AntigravityProvider({"model": "gemini-3.8-flash"}, {})
+        with patch("main._post_chat", new=AsyncMock(return_value=payload)):
+            result = asyncio.run(provider.text_chat(prompt="hi"))
+            chunks = asyncio.run(self._collect(provider.text_chat_stream(prompt="hi")))
+        self.assertIsInstance(result.usage, TokenUsage)
+        self.assertEqual(result.usage, TokenUsage(input_other=60, input_cached=40, output=7))
+        self.assertEqual(chunks[-1].is_chunk, False)
+        self.assertEqual(chunks[-1].usage.output, 7)
+        self.assertEqual(chunks[0].completion_text, "answer")
+        self.assertEqual(len([chunk.completion_text for chunk in chunks if chunk.is_chunk]), 1)
+
+    def test_content_filter_raises_safety_sentence(self) -> None:
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        from main import AntigravityProvider
+
+        payload = {
+            "error": {"message": "The model output failed Gemini platform safety checks."},
+            "choices": [{"finish_reason": "content_filter", "message": {"role": "assistant", "content": ""}}],
+        }
+        provider = AntigravityProvider({"model": "gemini-3.8-flash"}, {})
+        with patch("main._post_chat", new=AsyncMock(return_value=payload)):
+            with self.assertRaises(Exception) as caught:
+                asyncio.run(provider.text_chat(prompt="hi"))
+        self.assertIn("The model output failed Gemini platform safety checks.", str(caught.exception))
+
+    def test_post_chat_includes_error_message_without_bearer(self) -> None:
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        import httpx
+        from main import _post_chat
+
+        class _Response:
+            text = '{"error": {"message": "upstream status 400: Proto field is not repeating, cannot start list."}}'
+
+            def raise_for_status(self) -> None:
+                request = httpx.Request("POST", "http://127.0.0.1/v1/chat/completions")
+                response = httpx.Response(400, request=request, text=self.text)
+                raise httpx.HTTPStatusError("bad", request=request, response=response)
+
+        class _Client:
+            async def __aenter__(self) -> "_Client":
+                return self
+
+            async def __aexit__(self, *args: object) -> None:
+                return None
+
+            async def post(self, *args: object, **kwargs: object) -> _Response:
+                return _Response()
+
+        with patch("main.httpx.AsyncClient", return_value=_Client()), \
+                patch("main.ensure_bridge", new=AsyncMock()), \
+                patch("main.load_settings", return_value={"api_base": "http://127.0.0.1:9/v1", "token": "secret-token"}), \
+                patch("main.chat_url", return_value="http://127.0.0.1:9/v1/chat/completions"):
+            with self.assertRaises(RuntimeError) as caught:
+                asyncio.run(_post_chat({}, {"messages": []}, "session"))
+        self.assertIn("Proto field is not repeating, cannot start list.", str(caught.exception))
+        self.assertNotIn("Bearer", str(caught.exception))
+
+    async def _collect(self, stream: object) -> list[object]:
+        items = []
+        async for item in stream:  # type: ignore[operator]
+            items.append(item)
+        return items
+
 
 if __name__ == "__main__":
     unittest.main()

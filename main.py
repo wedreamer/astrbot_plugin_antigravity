@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import shutil
@@ -10,7 +11,9 @@ from urllib.parse import urlparse
 
 import httpx
 from astrbot.api.star import Context, Star, register
-from astrbot.core.provider.entities import LLMResponse, ProviderType
+from astrbot.core.message.components import Image, Plain
+from astrbot.core.message.message_event_result import MessageChain
+from astrbot.core.provider.entities import LLMResponse, ProviderType, TokenUsage
 from astrbot.core.provider.provider import Provider
 from astrbot.core.provider.register import register_provider_adapter
 
@@ -94,6 +97,43 @@ def _session_key(session_id: str | None, kwargs: dict[str, Any]) -> str:
     return "default"
 
 
+def bridge_error_text(response: httpx.Response) -> str:
+    body = response.text[:400]
+    try:
+        payload = response.json()
+    except json.JSONDecodeError:
+        return body
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict) and isinstance(error.get("message"), str) and error["message"]:
+            return error["message"]
+    return body
+
+
+def response_from_parsed(parsed: Any) -> LLMResponse:
+    if parsed.finish_reason == "content_filter" or parsed.safety_message:
+        raise Exception(parsed.safety_message or "The model output failed Gemini platform safety checks.")
+    usage = TokenUsage(**parsed.usage) if parsed.usage else None
+    components: list[Any] = []
+    if parsed.completion_text:
+        components.append(Plain(parsed.completion_text))
+    for image in parsed.images or []:
+        components.append(Image.fromBytes(base64.b64decode(image["data"])))
+    chain = MessageChain(components) if components else None
+    return LLMResponse(
+        role=parsed.role,
+        completion_text=parsed.completion_text,
+        result_chain=chain,
+        tools_call_args=parsed.tools_call_args or [],
+        tools_call_name=parsed.tools_call_name or [],
+        tools_call_ids=parsed.tools_call_ids or [],
+        tools_call_extra_content=parsed.tools_call_extra_content,
+        reasoning_content=parsed.reasoning_content,
+        reasoning_signature=parsed.reasoning_signature,
+        usage=usage,
+    )
+
+
 async def _post_chat(config: dict[str, Any], body: dict[str, Any], session_key: str) -> dict[str, Any]:
     settings = load_settings(config)
     await ensure_bridge(settings)
@@ -106,7 +146,10 @@ async def _post_chat(config: dict[str, Any], body: dict[str, Any], session_key: 
             },
             json={**body, "user": session_key},
         )
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as error:
+            raise RuntimeError(bridge_error_text(error.response)) from error
         payload = response.json()
     if not isinstance(payload, dict):
         raise RuntimeError("bridge returned a non-object completion")
@@ -162,7 +205,7 @@ class AntigravityProvider(Provider):
         request_max_retries: int | None = None,
         **kwargs: Any,
     ) -> LLMResponse:
-        del image_urls, audio_urls, extra_user_content_parts, request_max_retries
+        del request_max_retries
         payload = await _post_chat(
             self.provider_config,
             build_chat_body(ChatTurn(
@@ -173,17 +216,13 @@ class AntigravityProvider(Provider):
                 func_tool=func_tool,
                 tool_calls_result=tool_calls_result,
                 tool_choice=tool_choice,
+                image_urls=tuple(image_urls or ()),
+                audio_urls=tuple(audio_urls or ()),
+                extra_user_content_parts=tuple(extra_user_content_parts or ()),
             )),
             _session_key(session_id, kwargs),
         )
-        parsed = parse_bridge_completion(payload)
-        return LLMResponse(
-            role=parsed.role,
-            completion_text=parsed.completion_text,
-            tools_call_name=parsed.tools_call_name or [],
-            tools_call_ids=parsed.tools_call_ids or [],
-            tools_call_args=parsed.tools_call_args or [],
-        )
+        return response_from_parsed(parse_bridge_completion(payload))
 
     async def text_chat_stream(
         self,
@@ -214,13 +253,25 @@ class AntigravityProvider(Provider):
             request_max_retries=request_max_retries,
             **kwargs,
         )
-        result.is_chunk = True
-        yield result
-        final = LLMResponse(role=result.role, completion_text=result.completion_text)
-        final.tools_call_name = result.tools_call_name
-        final.tools_call_ids = result.tools_call_ids
-        final.tools_call_args = result.tools_call_args
-        yield final
+        yield LLMResponse(
+            role=result.role,
+            completion_text=result.completion_text,
+            reasoning_content=result.reasoning_content,
+            is_chunk=True,
+        )
+        yield LLMResponse(
+            role=result.role,
+            completion_text=result.completion_text,
+            result_chain=result.result_chain,
+            tools_call_args=result.tools_call_args,
+            tools_call_name=result.tools_call_name,
+            tools_call_ids=result.tools_call_ids,
+            tools_call_extra_content=result.tools_call_extra_content,
+            reasoning_content=result.reasoning_content,
+            reasoning_signature=result.reasoning_signature,
+            usage=result.usage,
+            is_chunk=False,
+        )
 
 
 @register(
